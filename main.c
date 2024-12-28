@@ -4,9 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
+#include <regex.h>
 #include <SDL2/SDL.h>
-
+#include <stdbool.h>
+#include <SDL2/SDL_mixer.h>
 #include "./digits.h"
 
 #ifdef PENGER
@@ -109,7 +110,7 @@ void render_digit_at(SDL_Renderer *renderer, SDL_Texture *digits, size_t digit_i
 }
 
 #ifdef PENGER
-void render_penger_at(SDL_Renderer *renderer, SDL_Texture *penger, float time, int flipped, SDL_Window *window)
+void render_penger_at(SDL_Renderer *renderer, SDL_Texture *penger, float time, SDL_Window *window)
 {
     int window_width, window_height;
     SDL_GetWindowSize(window, &window_width, &window_height);
@@ -140,7 +141,7 @@ void render_penger_at(SDL_Renderer *renderer, SDL_Texture *penger, float time, i
         (int) penger_height / PENGER_SCALE
     };
 
-    SDL_RenderCopyEx(renderer, penger, &src_rect, &dst_rect, 0, NULL, flipped);
+    SDL_RenderCopy(renderer, penger, &src_rect, &dst_rect);
 }
 #endif
 
@@ -169,10 +170,70 @@ typedef enum {
     MODE_CLOCK,
 } Mode;
 
+float parse_clock_time(const char *input) {
+    const char *regex = "\\s*([0-9]{1,2}):([0-9]{2}):([0-9]{2})(am|pm)?\\s*";
+    regex_t regex_compiled;
+
+    if (regcomp(&regex_compiled, regex, REG_EXTENDED | REG_ICASE) != 0) {
+        fprintf(stderr, "Could not compile regex\n");
+        return -1.0f;
+    }
+
+    regmatch_t match[5];
+    if (regexec(&regex_compiled, input, 5, match, 0) != 0) {
+        regfree(&regex_compiled);
+        fprintf(stderr, "Invalid time format\n");
+        return -1.0f;
+    }
+
+    char hour[3] = {0}, minute[3] = {0}, second[3] = {0}, ampm[3] = {0};
+    memcpy(hour, input + match[1].rm_so, match[1].rm_eo - match[1].rm_so);
+    memcpy(minute, input + match[2].rm_so, match[2].rm_eo - match[2].rm_so);
+    memcpy(second, input + match[3].rm_so, match[3].rm_eo - match[3].rm_so);
+    if (match[4].rm_so != -1) {
+        memcpy(ampm, input + match[4].rm_so, match[4].rm_eo - match[4].rm_so);
+    }
+    regfree(&regex_compiled);
+
+    int target_hour = atoi(hour);
+    int target_minute = atoi(minute);
+    int target_second = atoi(second);
+
+    if (target_hour < 0 || target_hour > 23 || target_minute < 0 || target_minute >= 60 || target_second < 0 || target_second >= 60) {
+        fprintf(stderr, "Invalid time values\n");
+        return -1.0f;
+    }
+
+    if (match[4].rm_so != -1) {
+        if (strcasecmp(ampm, "pm") == 0 && target_hour != 12) {
+            target_hour += 12;
+        } else if (strcasecmp(ampm, "am") == 0 && target_hour == 12) {
+            target_hour = 0;
+        }
+    }
+
+    float target_time_in_seconds = target_hour * 3600.0f + target_minute * 60.0f + target_second;
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    if (tm == NULL) {
+        fprintf(stderr, "Could not get local time\n");
+        return -1.0f;
+    }
+
+    float current_time_in_seconds = tm->tm_hour * 3600.0f + tm->tm_min * 60.0f + tm->tm_sec;
+
+    if (target_time_in_seconds < current_time_in_seconds) {
+        target_time_in_seconds += 24.0f * 3600.0f;
+    }
+
+    return target_time_in_seconds - current_time_in_seconds;
+}
 float parse_time(const char *time)
 {
-    float result = 0.0f;
-
+    float result = parse_clock_time(time);
+    if (result != -1.0f) {
+        return result;
+    }
     while (*time) {
         char *endptr = NULL;
         float x = strtof(time, &endptr);
@@ -256,7 +317,19 @@ int main(int argc, char **argv)
         }
     }
 
-    secc(SDL_Init(SDL_INIT_VIDEO));
+    secc(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO));
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+        fprintf(stderr, "SDL_mixer could not initialize: %s\n", Mix_GetError());
+        SDL_Quit();
+        return 1;
+    }
+    Mix_Chunk *alarm_sound = Mix_LoadWAV("ducksound.wav");
+    if (alarm_sound == NULL) {
+        fprintf(stderr, "Failed to load alarm sound: %s\n", Mix_GetError());
+        Mix_CloseAudio();
+        SDL_Quit();
+        return 1;
+    }
 
     SDL_Window *window =
         secp(SDL_CreateWindow(
@@ -292,6 +365,7 @@ int main(int argc, char **argv)
     float user_scale = 1.0f;
     char prev_title[TITLE_CAP];
     FpsDeltaTime fps_dt = make_fpsdeltatime(FPS);
+    bool alaram_played = false;
     while (!quit) {
         frame_start(&fps_dt);
         // INPUT BEGIN //////////////////////////////
@@ -380,7 +454,7 @@ int main(int argc, char **argv)
             // PENGER BEGIN //////////////////////////////
 
             #ifdef PENGER
-            render_penger_at(renderer, penger, displayed_time, mode==MODE_COUNTDOWN, window);
+            render_penger_at(renderer, penger, displayed_time, window);
             #endif
 
             // PENGER END //////////////////////////////
@@ -423,7 +497,6 @@ int main(int argc, char **argv)
             wiggle_cooldown = WIGGLE_DURATION;
         }
         wiggle_cooldown -= fps_dt.dt;
-
         if (!paused) {
             switch (mode) {
             case MODE_ASCENDING: {
@@ -437,6 +510,13 @@ int main(int argc, char **argv)
                     if (exit_after_countdown) {
                         SDL_Quit();
                         return 0;
+                    }
+                   if(!alaram_played){
+                        Mix_PlayChannel(-1, alarm_sound, 0);
+                        SDL_Delay(3000);
+                        alaram_played = true;
+                        Mix_FreeChunk(alarm_sound);
+                        Mix_CloseAudio();
                     }
                 }
             } break;

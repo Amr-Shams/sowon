@@ -10,14 +10,15 @@ Dependencies: [SDL2](https://www.libsdl.org/download-2.0.php)
 
 ### Debian
 ```console
-$ sudo apt-get install libsdl2-dev
+$ sudo apt-get install libsdl2-dev libsdl2-mixer-dev
 $ make
 ```
 
 ### MacOS
 
 ```console
-$ brew install sdl2 pkg-config
+$ brew install sdl2 pkg-config sdl2_mixer
+
 $ make
 ```
 
